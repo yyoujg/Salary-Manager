@@ -10,7 +10,13 @@ import {
 import cron from "node-cron";
 import crypto from "crypto";
 
-import { LUNCH, USERS, USER_KEYS, userKeyFromDiscordId, userNameFromKey } from "./data.js";
+import {
+  LUNCH,
+  USERS,
+  USER_KEYS,
+  userKeyFromDiscordId,
+  userNameFromKey,
+} from "./data.js";
 import { withStore, loadStore } from "./storage.js";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -26,7 +32,6 @@ function fromMin(n) {
   const m = String(n % 60).padStart(2, "0");
   return `${h}:${m}`;
 }
-// "24:00" 같은 표현 처리: 1440으로 취급
 function normalizeTimeToMin(t) {
   return t === "24:00" ? 1440 : toMin(t);
 }
@@ -43,6 +48,47 @@ function formatBusyItem(x) {
   const nm = userNameFromKey(x.userKey);
   const reason = x.reason ? ` (${x.reason})` : "";
   return `- [${x.id}] ${nm} ${x.date} ${x.start}~${x.end}${reason}`;
+}
+
+// ===== 날짜 파싱 (/go day) =====
+function toKstDateParts(d = new Date()) {
+  // 런타임이 어디서 돌든 KST 기준 날짜를 쓰기 위함 (간단 버전)
+  const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+  const yyyy = kst.getUTCFullYear();
+  const mm = String(kst.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(kst.getUTCDate()).padStart(2, "0");
+  return { yyyy, mm, dd };
+}
+
+function addDaysKst(ymd, days) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  // Date는 로컬타임 영향 있으니 UTC로 처리 후 KST 보정 방식 유지
+  const baseUtc = Date.UTC(y, m - 1, d);
+  const next = new Date(baseUtc + days * 24 * 60 * 60 * 1000);
+  const yyyy = next.getUTCFullYear();
+  const mm = String(next.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(next.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function parseGoDay(dayRaw) {
+  const raw = (dayRaw || "").trim();
+
+  const todayParts = toKstDateParts(new Date());
+  const today = `${todayParts.yyyy}-${todayParts.mm}-${todayParts.dd}`;
+
+  if (!raw || raw === "오늘" || raw.toLowerCase() === "today") return today;
+  if (raw === "내일" || raw.toLowerCase() === "tomorrow") return addDaysKst(today, 1);
+
+  // YYYY-MM-DD 검증
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+
+  // 최소한의 유효성(월/일 범위)만 체크
+  const [y, m, d] = raw.split("-").map(Number);
+  if (m < 1 || m > 12) return null;
+  if (d < 1 || d > 31) return null;
+
+  return raw;
 }
 
 // ===== /go 메시지/버튼 =====
@@ -65,14 +111,13 @@ function buildGoMessage({ date, start, end, durationMin }, responses, conflicts)
   const anyDeclined = USER_KEYS.some((k) => (responses[k] ?? "PENDING") === "DECLINE");
 
   if (allAccepted) lines.push(`\n확정이다. 그 시간에 모여라.`);
-  else if (anyDeclined) lines.push(`\n안 된다. 다른 시간 다시 잡아라.`);
-  else lines.push(`\n아직 대기다. 누가 답 안 했냐.`);
+  else if (anyDeclined) lines.push(`\n안 된다. 다른 날/시간으로 다시 잡아라.`);
+  else lines.push(`\n아직 대기다. 답 안 한 사람 빨리 눌러라.`);
 
   return lines.join("\n");
 }
 
 function buildGoButtons(proposalId) {
-  // 한 줄에 버튼 5개 제한 => 2줄(4명*2=8개)
   const row1 = new ActionRowBuilder();
   const row2 = new ActionRowBuilder();
 
@@ -94,23 +139,27 @@ function buildGoButtons(proposalId) {
   return [row1, row2];
 }
 
-// ===== 추천 유틸 (/go time 미입력 시) =====
-function formatCandidateList(cands) {
-  if (!cands.length) return "없다. 그날은 시간이 안 맞는다.";
-  return cands.map((c, i) => `${i + 1}) ${c.start}~${c.end}`).join("\n");
-}
+// ===== 추천 유틸 (/go 단순화 고정값) =====
+// 고정값: 18:00~24:00 / 120분 / 30분 간격 / 첫 후보 선택
+const GO_DEFAULT = {
+  from: "18:00",
+  to: "24:00",
+  durationMin: 120,
+  stepMin: 30,
+  maxCandidates: 20,
+};
 
-async function recommendSlots(date, durationMin, from = "18:00", to = "24:00", stepMin = 30, count = 5) {
+async function recommendSlotsFixed(date) {
   const store = await loadStore();
   const busy = store.busy.filter((b) => b.date === date);
 
-  const fromM = normalizeTimeToMin(from);
-  const toM = normalizeTimeToMin(to);
+  const fromM = normalizeTimeToMin(GO_DEFAULT.from);
+  const toM = normalizeTimeToMin(GO_DEFAULT.to);
 
   const candidates = [];
-  for (let t = fromM; t + durationMin <= toM; t += stepMin) {
+  for (let t = fromM; t + GO_DEFAULT.durationMin <= toM; t += GO_DEFAULT.stepMin) {
     const startM = t;
-    const endM = t + durationMin;
+    const endM = t + GO_DEFAULT.durationMin;
 
     let ok = true;
     for (const personKey of USER_KEYS) {
@@ -130,7 +179,7 @@ async function recommendSlots(date, durationMin, from = "18:00", to = "24:00", s
       const start = fromMin(startM);
       const end = endM === 1440 ? "24:00" : fromMin(endM);
       candidates.push({ start, end });
-      if (candidates.length >= count) break;
+      if (candidates.length >= GO_DEFAULT.maxCandidates) break;
     }
   }
 
@@ -159,7 +208,6 @@ async function fetchWeather(cityRaw) {
   const wind = w.wind?.speed;
 
   const nags = [];
-
   if (Number.isFinite(feels)) {
     if (feels <= 0) nags.push("체감이 영하다. 옷 얇게 입지 마라.");
     else if (feels <= 8) nags.push("쌀쌀하다. 겉옷 챙겨라.");
@@ -203,7 +251,6 @@ async function computeConflicts(date, start, end) {
 client.once("ready", () => {
   console.log(`✅ 로그인: ${client.user.tag}`);
 
-  // 매일 오전 7시(Asia/Seoul) 정각에 날씨 알림
   cron.schedule(
     "0 7 * * *",
     async () => {
@@ -251,7 +298,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // /busy (CRUD)
+    // /busy
     if (interaction.commandName === "busy") {
       const sub = interaction.options.getSubcommand();
       const callerKey = userKeyFromDiscordId(interaction.user.id);
@@ -352,7 +399,6 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
-        // 본인만 삭제
         if (item.userKey !== callerKey) {
           await interaction.reply({ content: "남의 건 삭제 못 한다.", ephemeral: true });
           return;
@@ -368,7 +414,10 @@ client.on("interactionCreate", async (interaction) => {
 
       if (sub === "clear") {
         if (!callerKey) {
-          await interaction.reply({ content: "등록된 멤버만 clear 가능하다.", ephemeral: true });
+          await interaction.reply({
+            content: "등록된 멤버만 clear 가능하다.",
+            ephemeral: true,
+          });
           return;
         }
 
@@ -381,40 +430,41 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // /go (제안 or 추천)
+    // /go (단순화)
     if (interaction.commandName === "go") {
-      const date = interaction.options.getString("date");
-      const time = interaction.options.getString("time"); // optional
-      const durationMin = interaction.options.getInteger("duration") ?? 120;
+      const dayRaw = interaction.options.getString("day"); // optional
+      const date = parseGoDay(dayRaw);
 
-      const from = interaction.options.getString("from") || "18:00";
-      const to = interaction.options.getString("to") || "24:00";
-      const step = interaction.options.getInteger("step") ?? 30;
-      const count = interaction.options.getInteger("count") ?? 5;
+      if (!date) {
+        await interaction.reply({
+          content: "day 입력이 이상하다. '오늘', '내일', 'YYYY-MM-DD' 중 하나로 넣어라.",
+          ephemeral: true,
+        });
+        return;
+      }
 
-      // 추천 모드
-      if (!time) {
-        const cands = await recommendSlots(date, durationMin, from, to, step, count);
-        const body = formatCandidateList(cands);
-
+      // 1) 그날 공통 가능 후보들 계산
+      const candidates = await recommendSlotsFixed(date);
+      if (!candidates.length) {
         await interaction.reply(
-          `할매가 가능한 시간 골라봤다.\n- 날짜: ${date}\n- 길이: ${durationMin}분\n- 탐색: ${from}~${to} / ${step}분 간격\n\n${body}\n\n원하는 걸로 /go date:${date} time:HH:MM duration:${durationMin} 다시 쳐라.`
+          `없다.\n- 날짜: ${date}\n- 기준: ${GO_DEFAULT.from}~${GO_DEFAULT.to}, ${GO_DEFAULT.durationMin}분, ${GO_DEFAULT.stepMin}분 간격\n그날은 그냥 쉬어라.`
         );
         return;
       }
 
-      // 제안 모드
-      const startMin = normalizeTimeToMin(time);
-      const endMin = clampDay(startMin + durationMin);
-      const end = endMin === 1440 ? "24:00" : fromMin(endMin);
-
+      // 2) 첫 번째 후보를 자동 선택해서 “제안” 생성
+      const chosen = candidates[0]; // {start,end}
       const proposalId = crypto.randomUUID().slice(0, 8);
 
       const responses = {};
       for (const k of USER_KEYS) responses[k] = "PENDING";
 
-      const conflicts = await computeConflicts(date, time, end);
-      const content = buildGoMessage({ date, start: time, end, durationMin }, responses, conflicts);
+      const conflicts = await computeConflicts(date, chosen.start, chosen.end);
+      const content = buildGoMessage(
+        { date, start: chosen.start, end: chosen.end, durationMin: GO_DEFAULT.durationMin },
+        responses,
+        conflicts
+      );
 
       const rows = buildGoButtons(proposalId);
       const msg = await interaction.reply({ content, components: rows, fetchReply: true });
@@ -425,9 +475,9 @@ client.on("interactionCreate", async (interaction) => {
           channelId: msg.channelId,
           messageId: msg.id,
           date,
-          start: time,
-          end,
-          durationMin,
+          start: chosen.start,
+          end: chosen.end,
+          durationMin: GO_DEFAULT.durationMin,
           creatorId: interaction.user.id,
           responses,
           status: "OPEN",
@@ -452,7 +502,6 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // 해당 당사자만 클릭 가능
     if (interaction.user.id !== expectedDiscordId) {
       await interaction.reply({ content: "네 버튼 아니다. 손 떼라.", ephemeral: true });
       return;
