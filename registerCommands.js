@@ -3,7 +3,7 @@ import "dotenv/config";
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
 
 const commands = [
-  // /lunch (점심/저녁/간식)
+  // /lunch
   new SlashCommandBuilder()
     .setName("lunch")
     .setDescription("할매가 점심/저녁/간식 메뉴 하나 딱 찍어준다.")
@@ -19,13 +19,44 @@ const commands = [
         )
     ),
 
+  // /nonsense
+  new SlashCommandBuilder()
+    .setName("nonsense")
+    .setDescription("할매가 넌센스 퀴즈 문제 하나 낸다 아이가.")
+    .addStringOption((o) =>
+      o
+        .setName("mode")
+        .setDescription("랜덤/순서대로 (기본: 랜덤)")
+        .setRequired(false)
+        .addChoices(
+          { name: "랜덤", value: "random" },
+          { name: "순서대로", value: "seq" }
+        )
+    ),
+
+  // /answer
+  new SlashCommandBuilder()
+    .setName("answer")
+    .setDescription("넌센스 퀴즈 정답 입력한다 아이가.")
+    .addStringOption((o) =>
+      o
+        .setName("text")
+        .setDescription("정답")
+        .setRequired(true)
+    ),
+
   // /weather
   new SlashCommandBuilder()
     .setName("weather")
     .setDescription("할매가 지금 날씨 알려준다 아이가.")
-    ,
+    .addStringOption((o) =>
+      o
+        .setName("city")
+        .setDescription("도시명 (예: Seoul, Busan). 안 넣으면 기본 도시로 한다.")
+        .setRequired(false)
+    ),
 
-  // /busy
+  // /busy (기존 그대로 두시면 됩니다)
   new SlashCommandBuilder()
     .setName("busy")
     .setDescription("못 되는 시간(바쁜 시간) 적어두는 기다.")
@@ -60,47 +91,27 @@ const commands = [
         .setName("remove")
         .setDescription("내 바쁜 시간 하나 지운다(본인만).")
         .addStringOption((o) =>
-          o.setName("id").setDescription("busy id (예: a1b2c3d4)").setRequired(true)
+          o.setName("id").setDescription("busy id").setRequired(true)
         )
     )
     .addSubcommand((sc) =>
       sc.setName("clear").setDescription("내 바쁜 시간 싹 비운다(본인만).")
     ),
 
-  // /go
+  // /go (추천 없음, 시작시간만)
   new SlashCommandBuilder()
     .setName("go")
-    .setDescription("할매가 가능한 시간 하나 딱 잡아가 제안한다.")
-    // required 먼저
+    .setDescription("할매가 시작시간 하나 딱 정해서 제안한다. (수락/거절만)")
     .addStringOption((o) =>
       o
-        .setName("from")
-        .setDescription("가능 시작시간 (HH:MM) 예: 18:00")
+        .setName("start")
+        .setDescription("시작시간 (HH:MM) 예: 19:30")
         .setRequired(true)
     )
-    .addStringOption((o) =>
-      o
-        .setName("to")
-        .setDescription("가능 종료시간 (HH:MM) 예: 24:00")
-        .setRequired(true)
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("duration")
-        .setDescription("필요 시간(분) 예: 60, 90, 120")
-        .setRequired(true)
-    )
-    // optional 나중
     .addStringOption((o) =>
       o
         .setName("day")
-        .setDescription("오늘/내일/YYYY-MM-DD (미입력은 오늘로 한다)")
-        .setRequired(false)
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("step")
-        .setDescription("검색 간격(분) 기본 30")
+        .setDescription("오늘/내일/YYYY-MM-DD (미입력은 오늘)")
         .setRequired(false)
     ),
 ].map((c) => c.toJSON());
@@ -115,4 +126,4 @@ await rest.put(
   { body: commands }
 );
 
-console.log("커맨드 등록 끝났다 아이가: /lunch /weather /busy /go");
+console.log("커맨드 등록 끝났다 아이가: /lunch /nonsense /answer /weather /busy /go");
