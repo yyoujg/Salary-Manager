@@ -10,17 +10,36 @@ import {
 import cron from "node-cron";
 import crypto from "crypto";
 
-import {
-  LUNCH,
-  USERS,
-  USER_KEYS,
-  userKeyFromDiscordId,
-  userNameFromKey,
-} from "./data.js";
-import { withStore, loadStore } from "./storage.js";
+import { FOOD_CATEGORIES } from "./data.js";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// ===== FOOD 추천 유틸 =====
+const uniq = (arr) => [...new Set(arr.filter(Boolean).map((x) => String(x).trim()).filter(Boolean))];
+
+function poolFromCategories(keys) {
+  const items = keys.flatMap((k) => FOOD_CATEGORIES[k] || []);
+  return uniq(items);
+}
+
+function getMealPool(mealType) {
+  // mealType: "lunch" | "dinner" | "snack"
+  if (mealType === "dinner") {
+    return poolFromCategories(["meat", "seafood", "soup_stew", "western_chinese", "street_food"]);
+  }
+  if (mealType === "snack") {
+    return poolFromCategories(["dessert_snack", "drink", "street_food"]);
+  }
+  // default lunch
+  return poolFromCategories(["staple", "soup_stew", "western_chinese", "street_food"]);
+}
+
+function mealLabel(mealType) {
+  if (mealType === "dinner") return "저녁";
+  if (mealType === "snack") return "간식";
+  return "점심";
+}
 
 // ===== 시간 유틸 =====
 function toMin(t) {
@@ -43,6 +62,15 @@ function isHHMM(t) {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(t) || t === "24:00";
 }
 
+// ===== 여기 아래 함수/상수는 기존 프로젝트에 이미 있다고 가정 =====
+// - USER_KEYS
+// - userKeyFromDiscordId(discordId)
+// - userNameFromKey(userKey)
+// - loadStore()
+// - withStore(asyncFn)
+// store 구조 예:
+// { busy: [], proposals: [] }
+
 function formatBusyItem(x) {
   const nm = userNameFromKey(x.userKey);
   const reason = x.reason ? ` (${x.reason})` : "";
@@ -51,7 +79,6 @@ function formatBusyItem(x) {
 
 // ===== 날짜 파싱 (/go day) =====
 function toKstDateParts(d = new Date()) {
-  // 런타임이 어디서 돌든 KST 기준 날짜를 쓰기 위함 (간단 버전)
   const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
   const yyyy = kst.getUTCFullYear();
   const mm = String(kst.getUTCMonth() + 1).padStart(2, "0");
@@ -61,7 +88,6 @@ function toKstDateParts(d = new Date()) {
 
 function addDaysKst(ymd, days) {
   const [y, m, d] = ymd.split("-").map(Number);
-  // Date는 로컬타임 영향 있으니 UTC로 처리 후 KST 보정 방식 유지
   const baseUtc = Date.UTC(y, m - 1, d);
   const next = new Date(baseUtc + days * 24 * 60 * 60 * 1000);
   const yyyy = next.getUTCFullYear();
@@ -79,11 +105,9 @@ function parseGoDay(dayRaw) {
   if (!raw || raw === "오늘" || raw.toLowerCase() === "today") return today;
   if (raw === "내일" || raw.toLowerCase() === "tomorrow") return addDaysKst(today, 1);
 
-  // YYYY-MM-DD 검증
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
 
-  // 최소한의 유효성(월/일 범위)만 체크
-  const [y, m, d] = raw.split("-").map(Number);
+  const [, m, d] = raw.split("-").map(Number);
   if (m < 1 || m > 12) return null;
   if (d < 1 || d > 31) return null;
 
@@ -268,10 +292,18 @@ client.once("ready", () => {
 client.on("interactionCreate", async (interaction) => {
   // 1) 슬래시 커맨드
   if (interaction.isChatInputCommand()) {
-    // /lunch
+    // /lunch (점심/저녁/간식)
     if (interaction.commandName === "lunch") {
-      const menu = pick(LUNCH);
-      await interaction.reply(`점심은 이거 묵어라: **${menu}**\n고민은 거기서 끝내라.`);
+      const type = interaction.options.getString("type") || "lunch"; // lunch/dinner/snack
+      const pool = getMealPool(type);
+
+      if (!pool.length) {
+        await interaction.reply("추천할 게 없다 아이가. FOOD_CATEGORIES 데이터부터 확인해라.");
+        return;
+      }
+
+      const menu = pick(pool);
+      await interaction.reply(`${mealLabel(type)}은 이거 묵어라: **${menu}**\n고민은 거기서 끝내라.`);
       return;
     }
 

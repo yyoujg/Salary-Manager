@@ -3,21 +3,27 @@ import "dotenv/config";
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
 
 const commands = [
-  // /lunch
+  // /lunch (점심/저녁/간식)
   new SlashCommandBuilder()
     .setName("lunch")
-    .setDescription("할매가 점심 메뉴 하나 딱 찍어준다."),
+    .setDescription("할매가 점심/저녁/간식 메뉴 하나 딱 찍어준다.")
+    .addStringOption((o) =>
+      o
+        .setName("type")
+        .setDescription("뭐 추천받을끼고? (기본: 점심)")
+        .setRequired(false)
+        .addChoices(
+          { name: "점심", value: "lunch" },
+          { name: "저녁", value: "dinner" },
+          { name: "간식", value: "snack" }
+        )
+    ),
 
   // /weather
   new SlashCommandBuilder()
     .setName("weather")
     .setDescription("할매가 지금 날씨 알려준다 아이가.")
-    .addStringOption((o) =>
-      o
-        .setName("city")
-        .setDescription("도시명 (예: Seoul, Busan). 안 넣으면 기본 도시로 한다.")
-        .setRequired(false)
-    ),
+    ,
 
   // /busy
   new SlashCommandBuilder()
@@ -61,7 +67,7 @@ const commands = [
       sc.setName("clear").setDescription("내 바쁜 시간 싹 비운다(본인만).")
     ),
 
-  // /go  ✅ required 옵션을 optional보다 앞에 둬야 한다.
+  // /go
   new SlashCommandBuilder()
     .setName("go")
     .setDescription("할매가 가능한 시간 하나 딱 잡아가 제안한다.")
