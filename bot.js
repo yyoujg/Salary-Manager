@@ -1,5 +1,9 @@
 // bot.js
 import "dotenv/config";
+import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
+import cron from "node-cron";
 import {
   Client,
   GatewayIntentBits,
@@ -7,17 +11,80 @@ import {
   ButtonBuilder,
   ButtonStyle,
 } from "discord.js";
-import cron from "node-cron";
-import crypto from "crypto";
 
 import { FOOD_CATEGORIES, NONSENSE_QUIZ } from "./data.js";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// =========================
+// 설정(고정 멤버/DB 경로)
+// =========================
+const STORE_PATH = path.resolve(process.cwd(), "store.json");
+
+// 친구 목록 (고정)
+// - 이전에 주신 디스코드 ID 기준
+const USER_KEYS = ["youngjin", "minsu", "youjung", "myeongjae"];
+
+const USER_META = {
+  youngjin: { name: "영진", discordId: "411236144219553792" },
+  minsu: { name: "민수", discordId: "372007150966538241" },
+  youjung: { name: "유정", discordId: "837984030745165905" },
+  myeongjae: { name: "명재", discordId: "272960214796468224" },
+};
+
+function userKeyFromDiscordId(id) {
+  for (const k of USER_KEYS) {
+    if (USER_META[k]?.discordId === id) return k;
+  }
+  return null;
+}
+function userNameFromKey(k) {
+  return USER_META[k]?.name ?? k;
+}
+
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const uniq = (arr) =>
+  [...new Set(arr.filter(Boolean).map((x) => String(x).trim()).filter(Boolean))];
 
-// ===== 공통 유틸 =====
-const uniq = (arr) => [...new Set(arr.filter(Boolean).map((x) => String(x).trim()).filter(Boolean))];
+// =========================
+// store.json (파일 기반 DB)
+// =========================
+async function loadStore() {
+  try {
+    const raw = await fs.readFile(STORE_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    return ensureStoreShape(parsed);
+  } catch {
+    const init = ensureStoreShape({});
+    await fs.writeFile(STORE_PATH, JSON.stringify(init, null, 2), "utf-8");
+    return init;
+  }
+}
 
+async function saveStore(store) {
+  await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
+}
+
+function ensureStoreShape(store) {
+  const s = store && typeof store === "object" ? store : {};
+  if (!Array.isArray(s.busy)) s.busy = [];
+  if (!Array.isArray(s.proposals)) s.proposals = [];
+  if (!s.nonsense || typeof s.nonsense !== "object") s.nonsense = {};
+  if (!s.nonsense.byChannel || typeof s.nonsense.byChannel !== "object")
+    s.nonsense.byChannel = {};
+  return s;
+}
+
+async function withStore(mutator) {
+  const store = await loadStore();
+  const result = await mutator(store);
+  await saveStore(store);
+  return result;
+}
+
+// =========================
+// 시간/날짜 유틸
+// =========================
 function isHHMM(t) {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(t) || t === "24:00";
 }
@@ -29,112 +96,6 @@ function normalizeTimeToMin(t) {
   return t === "24:00" ? 1440 : toMin(t);
 }
 
-// ===== FOOD 추천 =====
-function poolFromCategories(keys) {
-  const items = keys.flatMap((k) => FOOD_CATEGORIES?.[k] || []);
-  return uniq(items);
-}
-
-function getMealPool(mealType) {
-  if (mealType === "dinner") {
-    return poolFromCategories(["meat", "seafood", "soup_stew", "western_chinese", "street_food", "rice_noodle"]);
-  }
-  if (mealType === "snack") {
-    return poolFromCategories(["dessert_snack", "drink", "street_food"]);
-  }
-  return poolFromCategories(["staple", "soup_stew", "western_chinese", "street_food", "rice_noodle"]);
-}
-
-function mealLabel(mealType) {
-  if (mealType === "dinner") return "저녁";
-  if (mealType === "snack") return "간식";
-  return "점심";
-}
-
-// ===== 넌센스 퀴즈 =====
-function ensureStoreShape(store) {
-  if (!store.nonsense) store.nonsense = { byChannel: {} };
-  if (!store.proposals) store.proposals = [];
-  if (!store.busy) store.busy = [];
-}
-
-function normalizeAnswer(s) {
-  return String(s ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[.,!?~'"`]/g, "");
-}
-
-function pickNonsenseItemByMode(mode, idx) {
-  if (!Array.isArray(NONSENSE_QUIZ) || NONSENSE_QUIZ.length === 0) return null;
-
-  if (mode === "seq") {
-    const i = Number.isInteger(idx) ? idx : 0;
-    const item = NONSENSE_QUIZ[i % NONSENSE_QUIZ.length];
-    return { item, nextIdx: (i + 1) % NONSENSE_QUIZ.length };
-  }
-
-  return { item: pick(NONSENSE_QUIZ), nextIdx: idx ?? 0 };
-}
-
-function buildNonsenseQuestionText(item) {
-  return [
-    "넌센스 퀴즈다 아이가",
-    `- 문제: ${item.q}`,
-    "",
-    "정답은 /answer로 넣어라. (예: /answer text:모카우)",
-  ].join("\n");
-}
-
-function buildNonsenseCorrectText(item, userMention) {
-  return [
-    "정답이다 아이가.",
-    `- 맞춘 사람: ${userMention}`,
-    `- 정답: ${item.a}`,
-  ].join("\n");
-}
-
-async function postNonsenseQuestion(channelId, mode = "random") {
-  const picked = await withStore(async (store) => {
-    ensureStoreShape(store);
-
-    const st = store.nonsense.byChannel[channelId] || {
-      mode: "random",
-      idx: 0,
-      current: null,
-      attemptsByUser: {},
-      createdAt: null,
-      messageId: null,
-    };
-
-    st.mode = mode;
-
-    const res = pickNonsenseItemByMode(st.mode, st.idx);
-    if (!res?.item) return null;
-
-    st.idx = res.nextIdx;
-    st.current = { quizId: res.item.id, q: res.item.q, a: res.item.a };
-    st.attemptsByUser = {};
-    st.createdAt = new Date().toISOString();
-
-    store.nonsense.byChannel[channelId] = st;
-    return st.current;
-  });
-
-  if (!picked) return;
-
-  const ch = await client.channels.fetch(channelId);
-  const msg = await ch.send(buildNonsenseQuestionText(picked));
-
-  await withStore(async (store) => {
-    ensureStoreShape(store);
-    const st = store.nonsense.byChannel[channelId];
-    if (st) st.messageId = msg.id;
-  });
-}
-
-// ===== 날짜 파싱 (/go day) =====
 function toKstDateParts(d = new Date()) {
   const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
   const yyyy = kst.getUTCFullYear();
@@ -171,19 +132,13 @@ function parseGoDay(dayRaw) {
   return raw;
 }
 
-// ===== /go (시작시간만 제안 + 수락/거절 버튼만) =====
-function buildGoButtons(proposalId) {
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`go:${proposalId}:ACCEPT`)
-      .setLabel("간다")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`go:${proposalId}:DECLINE`)
-      .setLabel("못 간다")
-      .setStyle(ButtonStyle.Danger)
-  );
-  return [row];
+// =========================
+// Busy (/busy)
+// =========================
+function formatBusyItem(x) {
+  const nm = userNameFromKey(x.userKey);
+  const reason = x.reason ? ` (${x.reason})` : "";
+  return `- [${x.id}] ${nm} ${x.date} ${x.start}~${x.end}${reason}`;
 }
 
 // start가 busy 구간에 포함되면 경고
@@ -201,7 +156,6 @@ async function computeConflictsAtStart(date, start) {
     for (const b of slots) {
       const bs = normalizeTimeToMin(b.start);
       const be = normalizeTimeToMin(b.end);
-
       if (bs <= s && s < be) {
         const reason = b.reason ? `(${b.reason})` : "";
         conflicts[k].push(`${b.start}~${b.end}${reason}`);
@@ -210,6 +164,23 @@ async function computeConflictsAtStart(date, start) {
   }
 
   return conflicts;
+}
+
+// =========================
+// /go (시작시간 제안 + 수락/거절)
+// =========================
+function buildGoButtons(proposalId) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`go:${proposalId}:ACCEPT`)
+      .setLabel("간다")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`go:${proposalId}:DECLINE`)
+      .setLabel("못 간다")
+      .setStyle(ButtonStyle.Danger)
+  );
+  return [row];
 }
 
 function buildGoMessage({ date, start }, responses, conflicts) {
@@ -237,7 +208,100 @@ function buildGoMessage({ date, start }, responses, conflicts) {
   return lines.join("\n");
 }
 
-// ===== 날씨 =====
+// =========================
+// FOOD (/lunch)
+// =========================
+function poolFromCategories(keys) {
+  const items = keys.flatMap((k) => FOOD_CATEGORIES?.[k] || []);
+  return uniq(items);
+}
+
+function getMealPool(mealType) {
+  if (mealType === "dinner") {
+    return poolFromCategories([
+      "meat",
+      "seafood",
+      "soup_stew",
+      "western_chinese",
+      "street_food",
+      "rice_noodle",
+    ]);
+  }
+  if (mealType === "snack") {
+    return poolFromCategories(["dessert_snack", "drink", "street_food"]);
+  }
+  return poolFromCategories(["staple", "soup_stew", "western_chinese", "street_food", "rice_noodle"]);
+}
+
+function mealLabel(mealType) {
+  if (mealType === "dinner") return "저녁";
+  if (mealType === "snack") return "간식";
+  return "점심";
+}
+
+// =========================
+// 넌센스 퀴즈 (/nonsense, /answer) + 15시 자동출제
+// =========================
+function normalizeAnswer(s) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[.,!?~'"`]/g, "");
+}
+
+function pickNonsenseItem() {
+  if (!Array.isArray(NONSENSE_QUIZ) || NONSENSE_QUIZ.length === 0) return null;
+  return pick(NONSENSE_QUIZ);
+}
+
+function buildNonsenseQuestionText(item) {
+  return [
+    "넌센스 퀴즈다 아이가",
+    `- 문제: ${item.q}`,
+    "",
+    "정답은 /answer로 넣어라. (예: /answer text:모카우)",
+  ].join("\n");
+}
+
+function buildNonsenseCorrectText(item, userMention) {
+  return ["정답이다 아이가.", `- 맞춘 사람: ${userMention}`, `- 정답: ${item.a}`].join("\n");
+}
+
+async function postNonsenseQuestion(channelId) {
+  const item = pickNonsenseItem();
+  if (!item) return false;
+
+  const current = await withStore(async (store) => {
+    const st = store.nonsense.byChannel[channelId] || {
+      current: null,
+      attemptsByUser: {},
+      createdAt: null,
+      messageId: null,
+    };
+
+    st.current = { quizId: item.id, q: item.q, a: item.a };
+    st.attemptsByUser = {};
+    st.createdAt = new Date().toISOString();
+
+    store.nonsense.byChannel[channelId] = st;
+    return st.current;
+  });
+
+  const ch = await client.channels.fetch(channelId);
+  const msg = await ch.send(buildNonsenseQuestionText(current));
+
+  await withStore(async (store) => {
+    const st = store.nonsense.byChannel[channelId];
+    if (st) st.messageId = msg.id;
+  });
+
+  return true;
+}
+
+// =========================
+// 날씨 (/weather) + 07시 자동알림
+// =========================
 async function fetchWeather(cityRaw) {
   const city = cityRaw || process.env.WEATHER_DEFAULT_CITY || "Seoul";
   const key = process.env.WEATHER_API_KEY;
@@ -277,18 +341,19 @@ async function fetchWeather(cityRaw) {
   return `지금 ${name} 날씨다: ${desc}, ${temp}°C (체감 ${feels}°C), 습도 ${hum}%, 바람 ${wind} m/s${nagText}`;
 }
 
-// ===== ready =====
-client.once("ready", () => {
+// =========================
+// ready
+// =========================
+client.once("clientReady", () => {
   console.log(`✅ 로그인: ${client.user.tag}`);
 
-  // 채널 하나로 통일
-  const channelId = process.env.GUILD_ID;
+  const channelId = process.env.CHANNEL_ID;
   if (!channelId) {
-    console.warn("GUILD_ID 미설정: 자동 알림(날씨/넌센스) 스킵");
+    console.warn("CHANNEL_ID 미설정: 자동 알림(날씨/넌센스) 스킵");
     return;
   }
 
-  // 07:00 날씨 알림
+  // 07:00 날씨
   cron.schedule(
     "0 7 * * *",
     async () => {
@@ -303,13 +368,13 @@ client.once("ready", () => {
     { timezone: "Asia/Seoul" }
   );
 
-  // 15:00 넌센스 퀴즈 자동 출제
+  // 15:00 넌센스 자동 출제
   cron.schedule(
     "0 15 * * *",
     async () => {
       try {
-        const mode = process.env.NONSENSE_MODE || "random"; // random | seq
-        await postNonsenseQuestion(channelId, mode);
+        const ok = await postNonsenseQuestion(channelId);
+        if (!ok) console.warn("넌센스 DB 비어있음: NONSENSE_QUIZ 확인 필요");
       } catch (e) {
         console.error("넌센스 자동출제 오류:", e);
       }
@@ -318,9 +383,11 @@ client.once("ready", () => {
   );
 });
 
-// ===== interaction =====
+// =========================
+// interaction
+// =========================
 client.on("interactionCreate", async (interaction) => {
-  // 1) 슬래시 커맨드
+  // ---------- 슬래시 ----------
   if (interaction.isChatInputCommand()) {
     // /lunch
     if (interaction.commandName === "lunch") {
@@ -347,7 +414,8 @@ client.on("interactionCreate", async (interaction) => {
           "Seoul";
         const msg = await fetchWeather(city);
         await interaction.editReply(`날씨 궁금했나?\n${msg}`);
-      } catch {
+      } catch (e) {
+        console.error(e);
         await interaction.editReply(
           "날씨가 오늘 영 말을 안 듣는다. 도시명 바꿔보던지, 쪼매 있다가 다시 해봐라."
         );
@@ -357,26 +425,28 @@ client.on("interactionCreate", async (interaction) => {
 
     // /nonsense
     if (interaction.commandName === "nonsense") {
-      const mode = interaction.options.getString("mode") || "random";
       await interaction.deferReply();
 
+      if (!Array.isArray(NONSENSE_QUIZ) || NONSENSE_QUIZ.length === 0) {
+        await interaction.editReply("퀴즈 DB가 비어있다 아이가. data.js의 NONSENSE_QUIZ부터 채워라.");
+        return;
+      }
+
       try {
-        await postNonsenseQuestion(interaction.channelId, mode);
+        await postNonsenseQuestion(interaction.channelId);
         await interaction.editReply("문제 냈다 아이가. 위에 올라간 거 보고 맞춰봐라.");
       } catch (e) {
         console.error(e);
-        await interaction.editReply("문제 내는 게 꼬였다. DB(NONSENSE_QUIZ)부터 확인해라.");
+        await interaction.editReply("문제 내는 게 꼬였다. 콘솔 에러 로그부터 확인해라.");
       }
       return;
     }
 
-    // /answer
+    // /answer (2번 틀리면 정답 공개: 본인에게만)
     if (interaction.commandName === "answer") {
       const text = interaction.options.getString("text", true);
 
       const result = await withStore(async (store) => {
-        ensureStoreShape(store);
-
         const channelId = interaction.channelId;
         const st = store.nonsense.byChannel[channelId];
         if (!st?.current) return { ok: false, reason: "NO_QUESTION" };
@@ -434,7 +504,149 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // /go (추천 없음, 시작시간만 제안)
+    // /busy
+    if (interaction.commandName === "busy") {
+      const sub = interaction.options.getSubcommand();
+      const callerKey = userKeyFromDiscordId(interaction.user.id);
+
+      if (sub === "add") {
+        if (!callerKey) {
+          await interaction.reply({
+            content: "니는 등록된 멤버가 아니라서 못 한다. (영진/민수/유정/명재만 된다)",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const date = interaction.options.getString("date", true);
+        const start = interaction.options.getString("start", true);
+        const end = interaction.options.getString("end", true);
+        const reason = interaction.options.getString("reason") || "";
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isHHMM(start) || !isHHMM(end)) {
+          await interaction.reply({
+            content: "형식이 이상하다. date=YYYY-MM-DD, start/end=HH:MM으로 넣어라.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const s = normalizeTimeToMin(start);
+        const e = normalizeTimeToMin(end);
+        if (!(s < e)) {
+          await interaction.reply({
+            content: "시간이 좀 이상하다. 시작이 끝보다 빨라야 된다 아이가. 다시 넣어라.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const id = crypto.randomUUID().slice(0, 8);
+
+        await withStore(async (store) => {
+          store.busy.push({
+            id,
+            userKey: callerKey,
+            date,
+            start,
+            end,
+            reason: reason.trim() || null,
+            createdAt: new Date().toISOString(),
+          });
+        });
+
+        await interaction.reply(
+          `됐다. 박아놨다 아이가.\n${formatBusyItem({
+            id,
+            userKey: callerKey,
+            date,
+            start,
+            end,
+            reason: reason.trim() || null,
+          })}`
+        );
+        return;
+      }
+
+      if (sub === "list") {
+        const user = interaction.options.getString("user"); // optional
+        const targetKey = user || callerKey;
+
+        const store = await loadStore();
+        const list = store.busy
+          .filter((b) => (targetKey ? b.userKey === targetKey : true))
+          .sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
+
+        if (!list.length) {
+          await interaction.reply(
+            targetKey
+              ? `없다 아이가. ${userNameFromKey(targetKey)}는 그날그날 비어있네.`
+              : "없다 아이가. 아무도 안 막혀있네."
+          );
+          return;
+        }
+
+        const title = targetKey ? `${userNameFromKey(targetKey)} 못 되는 시간` : `전체 못 되는 시간`;
+        const body = list.map(formatBusyItem).join("\n");
+        await interaction.reply(`${title}\n${body}`);
+        return;
+      }
+
+      if (sub === "remove") {
+        if (!callerKey) {
+          await interaction.reply({
+            content: "니는 등록된 멤버가 아니라서 삭제도 못 한다.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const id = interaction.options.getString("id", true);
+        const store = await loadStore();
+        const item = store.busy.find((b) => b.id === id);
+        if (!item) {
+          await interaction.reply({
+            content: "그 번호는 없다 아이가. /busy list로 한번 보고 와라.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (item.userKey !== callerKey) {
+          await interaction.reply({
+            content: "그건 니꺼 아니다. 남의 거 건드리면 안 된다.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        await withStore(async (s) => {
+          s.busy = s.busy.filter((b) => b.id !== id);
+        });
+
+        await interaction.reply(`지웠다 아이가.\n${formatBusyItem(item)}`);
+        return;
+      }
+
+      if (sub === "clear") {
+        if (!callerKey) {
+          await interaction.reply({
+            content: "니는 등록된 멤버가 아니라서 싹 비우는 것도 못 한다.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        await withStore(async (s) => {
+          s.busy = s.busy.filter((b) => b.userKey !== callerKey);
+        });
+
+        await interaction.reply(`${userNameFromKey(callerKey)} 스케줄, 할매가 싹 비워놨다.`);
+        return;
+      }
+    }
+
+    // /go (추천 없음, 시작시간만)
     if (interaction.commandName === "go") {
       const dayRaw = interaction.options.getString("day");
       const date = parseGoDay(dayRaw);
@@ -468,7 +680,6 @@ client.on("interactionCreate", async (interaction) => {
       const msg = await interaction.reply({ content, components: rows, fetchReply: true });
 
       await withStore(async (store) => {
-        ensureStoreShape(store);
         store.proposals.push({
           id: proposalId,
           channelId: msg.channelId,
@@ -485,11 +696,10 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // /busy는 기존 코드 그대로 유지(당신 프로젝트에 이미 구현돼 있으니 여기서는 생략)
     return;
   }
 
-  // 2) 버튼(/go)
+  // ---------- 버튼(/go) ----------
   if (interaction.isButton()) {
     const [prefix, proposalId, action] = interaction.customId.split(":");
     if (prefix !== "go") return;
@@ -506,8 +716,6 @@ client.on("interactionCreate", async (interaction) => {
     const nextStatus = action === "ACCEPT" ? "ACCEPT" : "DECLINE";
 
     const updated = await withStore(async (store) => {
-      ensureStoreShape(store);
-
       const p = store.proposals.find((x) => x.id === proposalId);
       if (!p) return null;
       if (p.status !== "OPEN") return p;
@@ -532,11 +740,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const conflicts = await computeConflictsAtStart(updated.date, updated.start);
-    const content = buildGoMessage(
-      { date: updated.date, start: updated.start },
-      updated.responses,
-      conflicts
-    );
+    const content = buildGoMessage({ date: updated.date, start: updated.start }, updated.responses, conflicts);
 
     const disabled = updated.status !== "OPEN";
     const rows = buildGoButtons(updated.id).map((row) => {

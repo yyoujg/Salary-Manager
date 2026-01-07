@@ -136,7 +136,6 @@ export function userNameFromKey(userKey) {
   return USERS[userKey]?.name ?? userKey;
 }
 
-// data.js
 
 export const NONSENSE_QUIZ = [
   { id: "nq001", q: "눈이 좋은 사슴은?", a: "굿아이디어" },
