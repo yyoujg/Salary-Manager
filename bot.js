@@ -282,9 +282,9 @@ client.once("ready", () => {
   console.log(`✅ 로그인: ${client.user.tag}`);
 
   // 채널 하나로 통일
-  const channelId = process.env.CHANNEL_ID;
+  const channelId = process.env.GUILD_ID;
   if (!channelId) {
-    console.warn("CHANNEL_ID 미설정: 자동 알림(날씨/넌센스) 스킵");
+    console.warn("GUILD_ID 미설정: 자동 알림(날씨/넌센스) 스킵");
     return;
   }
 
