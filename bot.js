@@ -507,7 +507,7 @@ client.once("clientReady", async () => {
 
   const channelId = process.env.CHANNEL_ID;
   const workChannelId = process.env.WORK_CHANNEL_ID || channelId;
-  const guildId = process.env.GUILD_ID;
+  const guildId = process.env.CHANNEL_ID;
 
   if (!channelId) {
     console.warn(MESSAGES.console.channelIdNotSet);

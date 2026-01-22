@@ -95,7 +95,7 @@ export const MESSAGES = {
     channelIdNotSet:
       "CHANNEL_ID 없다 아이가. 자동 알림은 안 돌린다.",
     guildIdNotSet:
-      "GUILD_ID 없다 아이가. 근무 기능은 건너뛴다.",
+      "CHANNEL_ID 없다 아이가. 근무 기능은 건너뛴다.",
     workRoleSyncComplete:
       "근무 역할 다 맞춰놨다 아이가.",
     workRoleSyncError:
