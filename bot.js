@@ -668,6 +668,162 @@ function truncateField(str, maxLen = 1024) {
   return s.slice(0, maxLen - 3) + "...";
 }
 
+function fmtNum(n) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "-";
+  return (Math.round(n * 100) / 100).toString();
+}
+
+function detectStrengthLabel(strengthRaw) {
+  const s = String(strengthRaw ?? "").toLowerCase();
+  if (!s) return null;
+  if (s.includes("weak")) return "weak";
+  if (s.includes("strong")) return "strong";
+  return s;
+}
+
+function detectGeokLabel(geokguk) {
+  const g = geokguk?.geok_kor || geokguk?.geok || "";
+  return String(g || "").trim() || null;
+}
+
+function detectYongshinLabel(yongshin) {
+  const primary =
+    yongshin?.primary ?? yongshin?.primary_kor ?? yongshin?.primaryKor ?? null;
+  const secondary =
+    yongshin?.secondary ?? yongshin?.secondary_kor ?? yongshin?.secondaryKor ?? null;
+
+  const parts = [primary, secondary].filter(Boolean).map(String);
+  return parts.length ? parts.join(" / ") : null;
+}
+
+function buildInterpretationText(data) {
+  const strength = detectStrengthLabel(data?.strength);
+  const geok = detectGeokLabel(data?.geokguk);
+  const yongshin = detectYongshinLabel(data?.yongshin);
+  const fortune = data?.fortune;
+
+  const five = data?.five_kor && typeof data.five_kor === "object" ? data.five_kor : null;
+  const needElem = data?.lucky?.need_elem_kor || null;
+
+  const bigLuck = Array.isArray(data?.big_luck) ? data.big_luck : [];
+
+  let summary = "핵심 요약: (데이터 부족)";
+  if (strength === "weak") {
+    summary =
+      "핵심 요약: 기본 에너지가 약한 편이라, 혼자 버티기보다 환경·사람·흐름을 잘 타야 하는 타입입니다.";
+  } else if (strength === "strong") {
+    summary =
+      "핵심 요약: 기본 에너지가 강한 편이라, 목표를 정하고 밀어붙일 때 성과가 잘 나는 타입입니다.";
+  } else if (strength) {
+    summary =
+      `핵심 요약: 일간 강약(${strength}) 성향에 맞춰 환경과 루틴을 잡는 게 중요합니다.`;
+  }
+
+  let strengthBlock = "";
+  if (strength === "weak") {
+    strengthBlock = [
+      "일간 강약: weak",
+      "- 에너지가 센 사주가 아니라 무작정 버티는 방식이 불리합니다.",
+      "- 스트레스가 누적되면 급격히 소진될 수 있어, 회복 루틴이 핵심입니다.",
+      "- 야근/압박/혼자 책임 구조가 길어지면 손해를 보기 쉽습니다.",
+      "- 환경이 받쳐주면 안정적으로 성장합니다.",
+    ].join("\n");
+  } else if (strength === "strong") {
+    strengthBlock = [
+      "일간 강약: strong",
+      "- 체력/추진력이 강한 편이라 목표를 정하고 밀어붙이는 방식이 유리합니다.",
+      "- 다만 과속/과로로 균형이 깨지지 않게 관리가 필요합니다.",
+    ].join("\n");
+  } else if (strength) {
+    strengthBlock = `일간 강약: ${strength}`;
+  }
+
+  let geokBlock = "";
+  if (geok) {
+    if (String(geok).includes("정재")) {
+      geokBlock = [
+        "격국: 정재격",
+        "- 성실/규칙/계획/안정 수입(월급형)과 궁합이 좋습니다.",
+        "- 한방/투기/모험보다 '꾸준히 쌓는 구조'가 강점입니다.",
+        "- 회사·조직·플랫폼·시스템 안에서 성과가 잘 납니다.",
+      ].join("\n");
+    } else {
+      geokBlock = `격국: ${geok}`;
+    }
+  }
+
+  let fiveBlock = "";
+  if (five) {
+    const parts = Object.entries(five).map(([k, v]) => `${k}: ${fmtNum(v)}`);
+    fiveBlock = [
+      "오행 분포:",
+      `- ${parts.join(", ")}`,
+    ].join("\n");
+  }
+
+  let yongBlock = "";
+  if (yongshin) {
+    const yl = yongshin.toLowerCase();
+    const tips = [];
+    if (yl.includes("water")) tips.push("휴식/회복, 감정 순환, 여유/흐름");
+    if (yl.includes("wood")) tips.push("학습/성장, 기록/정리, 꾸준히 쌓기");
+    yongBlock = [
+      `용신: ${yongshin}`,
+      tips.length ? `- 실생활 적용: ${tips.join(" + ")}` : "",
+      "- 쉬지 않고 버티면 성과가 꺾이기 쉬워, 회복 루틴을 우선으로 두는 편이 안전합니다.",
+    ].filter(Boolean).join("\n");
+  }
+
+  let luckBlock = "";
+  if (bigLuck.length) {
+    const shown = bigLuck.slice(0, 5).map((p) => {
+      const range = p.age_range ?? p.year_range ?? "";
+      const pillar = p.pillar_kor ?? p.pillar ?? "";
+      return `${range} ${pillar}`.trim();
+    });
+    luckBlock = [
+      "대운(요약):",
+      `- ${shown.join(" · ")}`,
+      "- 대운은 '지금 시기엔 무엇을 우선해야 유리한지' 참고용으로 보시면 됩니다.",
+    ].join("\n");
+  }
+
+  let opsBlock = "";
+  if (strength === "weak") {
+    opsBlock = [
+      "운영 방식(추천):",
+      "- 밤샘/체력 갈아넣기보다 루틴(수면·운동·식사) 고정이 최우선입니다.",
+      "- 계획 + 기록 + 구조화가 성과를 만듭니다.",
+      "- 불확실한 도전보다 '안정 수입 + 점진적 성장' 전략이 유리합니다.",
+    ].join("\n");
+  } else if (strength === "strong") {
+    opsBlock = [
+      "운영 방식(추천):",
+      "- 목표를 명확히 하고 실행량을 확보하면 성과가 빠릅니다.",
+      "- 다만 과로로 리듬이 깨지지 않게 \"멈추는 루틴\"도 같이 설계하세요.",
+    ].join("\n");
+  }
+
+  let needBlock = "";
+  if (needElem) {
+    needBlock = `보완 포인트(필요 오행): ${needElem}`;
+  }
+
+  const blocks = [
+    summary,
+    fortune != null ? `종합 지표: ${fortune}` : null,
+    strengthBlock || null,
+    geokBlock || null,
+    fiveBlock || null,
+    yongBlock || null,
+    needBlock || null,
+    luckBlock || null,
+    opsBlock || null,
+  ].filter(Boolean);
+
+  return blocks.join("\n\n");
+}
+
 function buildSajuEmbed(body, birthLabel, hasSinsal) {
   const data = body.data ?? body;
   const embed = new EmbedBuilder();
@@ -767,6 +923,12 @@ function buildSajuEmbed(body, birthLabel, hasSinsal) {
   const fullDesc = parts.join("\n\n");
   embed.setDescription(truncateField(fullDesc, 4096));
 
+  const interpretation = buildInterpretationText(data);
+  embed.addFields({
+    name: "해석(요약)",
+    value: truncateField(interpretation, 1024),
+  });
+
   if (hasSinsal) {
     embed.setFooter({ text: MESSAGES.saju.sinsalBeta });
   }
@@ -777,7 +939,7 @@ function buildSajuEmbed(body, birthLabel, hasSinsal) {
 // =========================
 // ready
 // =========================
-client.once("clientReady", async () => {
+client.once("ready", async () => {
   console.log(MESSAGES.console.login(client.user.tag));
 
   const channelId = process.env.CHANNEL_ID; // 공지/날씨/넌센스 채널
